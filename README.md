@@ -1,6 +1,6 @@
 # Hazardous heat exposure in Native Lands in the United States
 
-Yoshira Ornelas Van Horne, Cascade Tuholske, Victoria D. Lynch, Raenita Spriggs, Yoonjung Ahn, Colin Raymond, Anne E. Nigra, Robbie M. Parks
+Jackson Chen, Cascade Tuholske, Robbie M. Parks
 
 ## Introduction
 

@@ -3,15 +3,6 @@ title: "Figure 2"
 output: html_document
 ---
 
-## First step to load packages and file locations etc.
-```{r include=FALSE}
-rm(list=ls())
-project.folder = paste0(print(here::here()),'/')
-source(paste0(project.folder,'create_folder_structure.R'))
-source(paste0(functions.folder,'script_initiate.R'))
-
-```
-
 ## Load specific plotting packages
 ```{r, message=FALSE}
 # load required packages
@@ -83,7 +74,7 @@ USA.df$native_id <- as.character(USA.df$native_id)
 ```{r}
 dat.wbgt.summarised.merged.weighted.native.more.info <- dat.wbgt.summarised %>%
   left_join(
-    shapefile.data %>% select(GEOID, NAME, STATE_NAME, FUNCSTAT, POP_2020),
+    shapefile.data %>% select(GEOID, NAME, NAMELSAD, STATE_NAME, FUNCSTAT, POP_2020),
     by = c('native_id' = 'GEOID')
   ) %>%
   filter(!is.na(STATE_NAME), !is.na(POP_2020), POP_2020 > 0)
@@ -398,13 +389,15 @@ plot_total_change <- function(threshold_chosen, legend_chosen = 0) {
     geom_polygon(
       data = us_aea,
       aes(x = long, y = lat, group = group),
-      fill = 'grey35',
-      color = 'black',
-      size = 0.5
+      fill = alpha('grey35', 1), 
+      color = alpha('grey15', 0.9),
+      size = 0.25
     ) +
     geom_polygon(
       data = USA.df.merged,
       aes(x = long, y = lat, group = group, fill = .data[[wbgt_col]]),
+      color = alpha("white", 0.01),
+      size = 0.01
     ) +
     scale_fill_gradientn(
       colors = rev(met.brewer('Cassatt2')),
@@ -465,13 +458,15 @@ plot_total_disparity_change <- function(threshold_chosen, legend_chosen = 0) {
     geom_polygon(
       data = us_aea,
       aes(x = long, y = lat, group = group),
-      fill = 'grey35',
-      color = 'black',
-      size = 0.5
+      fill = alpha('grey35', 1),
+      color = alpha('grey15', 0.9),
+      size = 0.25
     ) +
     geom_polygon(
       data = USA.df.merged,
       aes(x = long, y = lat, group = group, fill = .data[[wbgt_col]]),
+      color = alpha("white", 0.01),
+      size = 0.01
     ) +
     scale_fill_gradientn(
       colors = rev(met.brewer('Isfahan1')),
@@ -558,47 +553,4 @@ pdf(
     pointsize = 12)
 print(plot.28.sorted)
 dev.off()
-```
-
-## Save output data for Figure 2a
-```{r}
-dat.wbgt.summarised.merged.weighted.native.state.output <- dat.wbgt.summarised.merged.weighted.native.state %>%
-  filter(STATE_NAME != 'USA') %>%
-  select(state, STATE_NAME, year, wbgt_28_diff) %>%
-  mutate(wbgt_28_diff = round(wbgt_28_diff, 1))
-
-write_csv(
-  dat.wbgt.summarised.merged.weighted.native.state.output,
-  paste0(figures.folder, 'Figure_2a_native.csv')
-)
-```
-
-## Save output data for Figure 2b
-```{r}
-dat.wbgt.summarised.regression.output <- dat.wbgt.summarised.regression %>%
-  select(native_id, total_change_wbgt_28) %>%
-  mutate(total_change_wbgt_28 = round(total_change_wbgt_28, 1)) %>%
-  left_join(shapefile.data, by = c('native_id' = 'GEOID')) %>%
-  filter(!is.na(POP_2020), POP_2020 > 0) %>%
-  select(native_id, total_change_wbgt_28, NAME, STATE_NAME, POP_2020)
-
-write_csv(
-  dat.wbgt.summarised.regression.output,
-  paste0(figures.folder, 'Figure_2b_native.csv')
-)
-```
-
-## Save output data for Figure 2c
-```{r}
-dat.wbgt.summarised.regression.disparity.output <- dat.wbgt.summarised.regression %>%
-  select(native_id, total_change_disparity_wbgt_28) %>%
-  mutate(total_change_disparity_wbgt_28 = round(total_change_disparity_wbgt_28, 1)) %>%
-  left_join(shapefile.data, by = c('native_id' = 'GEOID')) %>%
-  filter(!is.na(POP_2020), POP_2020 > 0) %>%
-  select(native_id, total_change_disparity_wbgt_28, NAME, STATE_NAME, POP_2020)
-
-write_csv(
-  dat.wbgt.summarised.regression.disparity.output,
-  paste0(figures.folder, 'Figure_2c_native.csv')
-)
 ```

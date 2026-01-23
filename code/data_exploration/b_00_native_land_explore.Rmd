@@ -3,14 +3,6 @@ title: "Native land explore"
 output: html_document
 ---
 
-## Load file locations
-```{r include=FALSE}
-rm(list=ls())
-project.folder = paste0(print(here::here()),'/')
-source(paste0(project.folder,'create_folder_structure.R'))
-source(paste0(functions.folder,'script_initiate.R'))
-```
-
 ## Load specific plotting packages
 ```{r, message=FALSE}
 # load required packages
@@ -217,8 +209,6 @@ state_counts = shapefile.data %>%
 ```{r}
 # Population by State
 print(state_pop, n = Inf)
-# Population by Native land (A (Active/Federal),N (non-reservation/trust land),S(State))
-print(funcstat_counts)
 # Territories by State
 print(state_counts, n = Inf)
 ```

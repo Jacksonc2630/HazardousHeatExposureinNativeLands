@@ -3,14 +3,6 @@ title: "Figure 1"
 output: html_document
 ---
 
-## Load file locations
-```{r include=FALSE}
-rm(list=ls())
-project.folder = paste0(print(here::here()),'/')
-source(paste0(project.folder,'create_folder_structure.R'))
-source(paste0(functions.folder,'script_initiate.R'))
-```
-
 ## Load packages
 ```{r, message=FALSE}
 library(data.table)
@@ -23,6 +15,11 @@ library(cowplot)
 library(MetBrewer)
 library(scales)
 library(readr)
+library(tidyverse)
+
+project.folder = paste0(print(here::here()),'/')
+source(paste0(project.folder,'create_folder_structure.R'))
+source(paste0(functions.folder,'script_initiate.R'))
 ```
 
 ## Prepare map structure
@@ -51,6 +48,69 @@ dat.wbgt.summarised.regression = readRDS(paste0(wbgt.folder,'weighted_area_raste
   mutate(native_id = as.integer(as.character(native_id)))
 ```
 
+## Load WBGT over time file
+```{r}
+dat.wbgt.summarised = readRDS(paste0(wbgt.folder,'weighted_area_raster_native_wbgtmax_daily_',start_year_wbgt,'_',end_year_wbgt,'_over_time.rds'))
+```
+
+## Prepare data for Panel A: Territory bar chart (Requires Figure 2 code objects
+```{r}
+dat.territory <- dat.wbgt.summarised.merged.weighted.native.more.info %>%
+  filter(!is.na(POP_2020), POP_2020 > 0)
+
+## Calculate population-weighted values by territory and year
+dat.territory.year <- dat.territory %>%
+  group_by(native_id, NAME, NAMELSAD, STATE_NAME, year) %>%
+  summarise(
+    wbgt_28 = weighted.mean(wbgt_28, POP_2020, na.rm = TRUE),
+    POPULATION = sum(POP_2020),
+    .groups = "drop"
+  ) %>%
+  mutate(wbgt_28_pop = wbgt_28 * POPULATION)
+
+## Take 5-year average for each territory
+dat.territory.5year <- dat.territory.year %>%
+  filter(year %in% years_wbgtmax[c((length(years_wbgtmax)-4):length(years_wbgtmax))]) %>%
+  group_by(native_id, NAME, NAMELSAD, STATE_NAME) %>%  # Keep STATE_NAME here!
+  summarise(
+    wbgt_28_pop_mean = mean(wbgt_28_pop),
+    .groups = "drop"
+  )
+
+## Count territories per state and create state labels
+state_territory_counts <- dat.territory.5year %>%
+  group_by(STATE_NAME) %>%
+  summarise(
+    n_territories = n_distinct(native_id),
+    total_person_days = sum(wbgt_28_pop_mean),
+    .groups = "drop"
+  ) %>%
+  mutate(STATE_LABEL = paste0(STATE_NAME, " (", n_territories, ")"))
+
+## Calculate rank and merge
+dat.rank <- state_territory_counts %>%
+  arrange(total_person_days) %>%
+  mutate(rank = row_number())
+
+## Plot data preparation
+dat.plot <- dat.territory.5year %>%
+  left_join(state_territory_counts, by = "STATE_NAME") %>%
+  left_join(dat.rank %>% select(STATE_NAME, rank), by = "STATE_NAME")
+
+top_n <- 100 # of Territories included
+
+tribe_totals <- dat.plot %>%
+  group_by(NAME) %>%
+  summarise(total = sum(wbgt_28_pop_mean), .groups = "drop")
+
+top_tribes <- tribe_totals %>%
+  arrange(desc(total)) %>%
+  slice_head(n = top_n) %>%
+  pull(NAME)
+
+dat.top <- dat.plot %>% filter(NAME %in% top_tribes)
+```
+
 ## Load US native shapefile for mapping
 ```{r}
 # load shapefile of entire United States by native
@@ -71,11 +131,6 @@ USA.df = merge(map, shapefile.data, by='id')
 USA.df$native_id = as.integer(as.character(USA.df$GEOID))
 ```
 
-## Load WBGT over time file
-```{r}
-dat.wbgt.summarised = readRDS(paste0(wbgt.folder,'weighted_area_raster_native_wbgtmax_daily_',start_year_wbgt,'_',end_year_wbgt,'_over_time.rds'))
-```
-
 ## Load US state shapefile for mapping
 ```{r}
 us = readOGR(dsn=paste0(data.folder,"shapefiles/states"),layer="states")
@@ -90,6 +145,50 @@ us_aea = us_aea[us_aea$STATE_FIPS %in% states_included,]
 us_aea = spTransform(us_aea, CRS("+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs"))
 
 us_aea = fortify(us_aea)
+```
+
+## Create Panel A: Territory stacked bar chart
+```{r}
+plot.territory.bar.chart <-
+  ggplot(dat.top,
+         aes(x = reorder(NAME, wbgt_28_pop_mean, FUN = sum),
+             y = wbgt_28_pop_mean,
+             fill = STATE_NAME)) +
+  geom_col(width = .75, colour = "white", linewidth = .125, position = "stack") +
+  coord_flip() +
+  scale_x_discrete(labels = function(x) {
+    sapply(x, function(name) {
+      unique_label <- dat.top %>% 
+        filter(NAME == name) %>% 
+        pull(NAMELSAD) %>% 
+        unique() %>%
+        paste(collapse = ", ")
+      return(unique_label)
+    })
+  }) +
+  labs(
+    y = paste0('Mean annual dangerous hot-humid person-days\n',
+               end_year_wbgt-4, '-', end_year_wbgt),
+    fill = "State",
+    x = paste0('Top 100 Territories by Hazardous Heat Exposure')
+  ) +
+  scale_y_continuous(labels = scales::comma,
+                     expand = expansion(mult = c(0.02, 0.15))) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_line(colour = "gray95", linewidth = .2),
+    panel.grid.major.y = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    plot.background  = element_rect(fill = "white"),
+    axis.text.x = element_text(size = 9, margin = margin(t = 8)),
+    axis.text.y = element_text(size = 5, margin = margin(r = 8)),
+    axis.title.x = element_text(margin = margin(t = 12), size = 10),
+    axis.title.y = element_text(margin = margin(r = 12), size = 10),
+    legend.position = "bottom",
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 9),
+    legend.box = "horizontal"
+  )
 ```
 
 ## Prepare summary maps
@@ -107,13 +206,16 @@ legend_create_count_last_5_years = function(threshold){
 
 plot_last_5_years = function(threshold_chosen,legend_chosen=0){
   p = ggplot() +
-    geom_polygon(data=us_aea,aes(x=long,y=lat,group=group),fill='grey35',color='black',size=0.5) +
+    geom_polygon(data=us_aea,aes(x=long,y=lat,group=group),
+                 fill=alpha('grey35', 1),
+                 color=alpha('grey15', 0.9),
+                 size=0.25) +
     geom_polygon(data=USA.df.merged,aes(x=long,y=lat,group=group,
-                                        fill=get(paste0('wbgt_',threshold_chosen,'_',(end_year_wbgt-4),'_',end_year_wbgt))),size=0) +
+                                        fill=get(paste0('wbgt_',threshold_chosen,'_',(end_year_wbgt-4),'_',end_year_wbgt))),
+                 color = scales::alpha("white", 0.01),
+                 size = 0.01) +
     scale_fill_gradientn(colors=rev(MetBrewer::met.brewer('Tam')), 
-                         limits = c(0, max(USA.df.merged$wbgt_26_2016_2020, 
-                                          USA.df.merged$wbgt_30_2016_2020, 
-                                          na.rm=TRUE)),
+                         limits = c(0,max(USA.df.merged$wbgt_28_2016_2020)),
                          na.value = "grey35") +
     coord_fixed() + xlab('') + ylab('') + theme_bw() +
     theme(panel.grid.major = element_blank(),
@@ -132,25 +234,33 @@ plot_last_5_years = function(threshold_chosen,legend_chosen=0){
           guides(fill = guide_colorbar(direction = "horizontal", title.position="left",barwidth = 10,barheight = 1,title.vjust = 0.8, 
                                   title = legend_create_count_last_5_years(threshold_chosen)),legend.text=element_text(size=5)) 
     }  
+
     return(p)
 }
-plot.count.end.year.legend = cowplot::get_legend(plot_last_5_years(26,1))
-plot.count.last.5.years.26 = plot_last_5_years(26,1)
+
 plot.count.last.5.years.28 = plot_last_5_years(28,1)
-plot.count.last.5.years.30 = plot_last_5_years(30,1)
+
 ```
 
 ## Plot
 ```{r}
-pdf(paste0(wbgtmax.folder,'Figure_1.pdf'),paper='a4r',width=0,height=0)
-plot_grid(plot.count.last.5.years.26, plot.count.last.5.years.28, 
-          label_size = 14 ,
-          label_x = -0.02, label_y = 1,
-          labels = c('(a)', '(b)'))
+
+pdf(paste0(figures.folder,'Figure_1.pdf'), 
+    paper = 'a4r',
+    width = 0,
+    height = 0)
+print(plot_grid(plot.territory.bar.chart, 
+                plot.count.last.5.years.28, 
+                label_size = 14,
+                label_x = -0.02, 
+                label_y = 1,
+                labels = c('(a)', '(b)')))
 dev.off()
 
-plot_grid(plot.count.last.5.years.26, plot.count.last.5.years.28, 
-          label_size = 14 ,
-          label_x = -0.02, label_y = 1,
+plot_grid(plot.territory.bar.chart,
+          plot.count.last.5.years.28, 
+          label_size = 14,
+          label_x = -0.02, 
+          label_y = 1,
           labels = c('(a)', '(b)'))
 ```
