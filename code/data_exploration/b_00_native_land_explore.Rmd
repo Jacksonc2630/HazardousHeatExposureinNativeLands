@@ -1,0 +1,276 @@
+---
+title: "Native land explore"
+output: html_document
+---
+
+## Setup - load packages and folder structure
+```{r, message=FALSE}
+rm(list = ls())
+
+# load required packages
+library(ggplot2)
+library(rgdal)
+library(sf)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(purrr)
+library(stringr)
+library(here)
+
+# set up folder paths
+project.folder = paste0(here::here(), '/')
+source(paste0(project.folder, 'create_folder_structure.R'))
+source(paste0(functions.folder, 'script_initiate.R'))
+```
+
+## Prepare map structure
+```{r}
+theme_map = function(base_size = 8, base_family = "") {
+  require(grid)
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      axis.line = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      axis.title = element_blank(),
+      panel.background = element_blank(),
+      panel.border = element_blank(),
+      panel.grid = element_blank(),
+      panel.spacing = unit(0, "lines"),
+      plot.background = element_blank(),
+      legend.position = 'bottom'
+    )
+}
+```
+
+## Load Shapefile Data
+```{r}
+load_native_boundaries = function(project.folder) {
+  us.main = readOGR(
+    dsn = paste0(project.folder, "data/shapefiles/native_boundaries/"),
+    layer = "tl_2020_us_aitsn",
+    verbose = FALSE
+  ) %>%
+    spTransform(CRS("+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs"))
+
+  us.main@data$GEOID = str_pad(as.character(us.main@data$GEOID), width = 7, side = "left", pad = "0")
+  us.main@data$id = rownames(us.main@data)
+  message("Loaded ", nrow(us.main@data), " native territories")
+  return(us.main)
+}
+```
+
+## Load Population Data
+```{r}
+load_population_data = function(project.folder) {
+  # Use 2000-2025 folder but only keep years up to 2020
+  pop.files = list.files(
+    paste0(project.folder, "data/population/2000-2025/"),
+    pattern = "\\.csv$",
+    full.names = TRUE
+  )
+
+  pop.data <- map_df(pop.files, ~{
+    read_csv(.x, show_col_types = FALSE,
+             col_types = cols(GEOID = col_character(),
+                              population = col_double())) %>%
+      mutate(year  = as.integer(str_extract(basename(.x), "\\d{4}")),
+             GEOID = str_pad(GEOID, width = 7, side = "left", pad = "0"))
+  })
+
+  # Filter to only years up to 2020
+  pop.data = pop.data %>% filter(year <= 2020)
+
+  pop.data.wide = pop.data %>%
+    pivot_wider(names_from = year,
+                values_from = population,
+                names_prefix = "POP_")
+}
+```
+
+## State Assignment
+```{r}
+assign_state_info = function(native_sp, shapefile.data, project.folder) {
+
+  # Load states shapefile
+  states_sf = st_read(
+    paste0(project.folder, "data/shapefiles/states/states.shp"),
+    quiet = TRUE
+  )
+
+  native_sf = st_as_sf(native_sp) %>%
+  st_transform(st_crs(states_sf))
+  native_sf = st_make_valid(native_sf)
+  states_sf = st_make_valid(states_sf)
+
+  # Calculate each territory's total area BEFORE intersection
+  native_sf$territory_area = as.numeric(st_area(native_sf))
+
+  # Compute geometric intersection
+  intersections = st_intersection(native_sf, states_sf)
+
+  intersections$intersection_area = as.numeric(st_area(intersections))
+
+  intersections = intersections %>%
+    mutate(area_proportion = intersection_area / territory_area)
+
+  # Log how many intersections we found
+  message("Raw intersections: ", nrow(intersections), " pieces across ",
+          n_distinct(intersections$GEOID), " territories and ",
+          n_distinct(intersections$STATE_NAME), " states")
+
+# Remove intersections with near-zero area
+  min_area_threshold = 1000  # square meters
+  min_proportion_threshold = 0.01
+  
+  slivers = intersections %>%
+    filter(intersection_area < min_area_threshold |
+           area_proportion < min_proportion_threshold)
+  
+  intersections_clean = intersections %>%
+    filter(intersection_area >= min_area_threshold,
+           area_proportion >= min_proportion_threshold)
+
+  # For each territory, find the PRIMARY state (largest area share)
+  primary_state = intersections_clean %>%
+    st_drop_geometry() %>%
+    group_by(GEOID) %>%
+    slice_max(area_proportion, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    select(GEOID, STATE_NAME, STATE_FIPS, area_proportion)
+
+  multi_state = intersections_clean %>%
+    st_drop_geometry() %>%
+    group_by(GEOID) %>%
+    mutate(n_states = n()) %>%
+    ungroup()
+
+  genuinely_multi = multi_state %>%
+    filter(n_states > 1) %>%
+    select(GEOID, STATE_NAME, area_proportion, n_states)
+
+  native_sf_with_state = native_sf %>%
+    left_join(
+      primary_state %>% select(GEOID, STATE_NAME, STATE_FIPS),
+      by = "GEOID"
+    ) %>%
+    left_join(
+      shapefile.data %>% select(GEOID, starts_with("POP_")),
+      by = "GEOID"
+    )
+
+  state_lookup = primary_state %>%
+    select(GEOID, STATE_NAME)
+
+  message("\nAfter area-based assignment: ",
+          nrow(state_lookup), " unique territories | ",
+          n_distinct(state_lookup$STATE_NAME, na.rm = TRUE), " states")
+
+  # Save the cleaned intersection data for potential later use
+  saveRDS(intersections_clean %>% st_drop_geometry(),
+          paste0(project.folder, "data/processed/territory_state_intersections.rds"))
+
+  return(list(
+    state_lookup = state_lookup,
+    native_sf_with_state = native_sf_with_state,
+    primary_state = primary_state
+  ))
+}
+```
+
+## Main Processing
+```{r}
+# Load data
+us.main = load_native_boundaries(project.folder)
+pop.data.wide = load_population_data(project.folder)
+
+# Merge population with shapefile
+shapefile.data = us.main@data %>%
+  as_tibble() %>%
+  left_join(pop.data.wide, by = "GEOID") %>%
+  mutate(across(starts_with("POP_"), as.numeric))
+
+message("Merged: ", nrow(shapefile.data), " rows | ",
+        sum(!is.na(shapefile.data$POP_2020)), " with 2020 pop")
+
+# Add state information using area-based assignment
+state_results = assign_state_info(us.main, shapefile.data, project.folder)
+native_sf_with_state = state_results$native_sf_with_state
+state_lookup = state_results$state_lookup
+
+shapefile.data = shapefile.data %>%
+  left_join(state_lookup, by = "GEOID")
+
+message("Final: ", sum(!is.na(shapefile.data$STATE_NAME)), " territories with states")
+```
+
+## Prepare Map Data
+```{r, warning=FALSE}
+map = fortify(us.main)
+USA.df = merge(map, us.main@data, by = "id") %>%
+  mutate(native_id = str_pad(as.character(GEOID), width = 7, side = "left", pad = "0"))
+message("\nMap data prepared: ", nrow(USA.df), " polygon vertices")
+
+## Save files
+saveRDS(shapefile.data, paste0(project.folder, "data/processed/shapefile_data_all.rds"))
+saveRDS(us.main, paste0(project.folder, "data/processed/us_main_shapefile.rds"))
+saveRDS(USA.df, paste0(project.folder, "data/processed/usa_map_data.rds"))
+saveRDS(state_results$primary_state, paste0(project.folder, "data/processed/primary_state_assignment.rds"))
+
+# Also save state population summary
+state_pop = native_sf_with_state %>%
+  st_drop_geometry() %>%
+  filter(!is.na(STATE_NAME)) %>%
+  group_by(STATE_NAME) %>%
+  summarise(
+    total_pop = sum(POP_2020, na.rm = TRUE),
+    n_territories = n_distinct(GEOID),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_pop))
+
+saveRDS(state_pop, paste0(project.folder, "data/processed/state_population_summary.rds"))
+
+message("\nSaved all processed files!")
+```
+
+## Calculate Statistics
+```{r}
+# Summary statistics
+territories_with_pop = sum(!is.na(shapefile.data$POP_2020) & shapefile.data$POP_2020 > 0)
+territories_no_pop = sum(is.na(shapefile.data$POP_2020) | shapefile.data$POP_2020 == 0)
+
+message("SUMMARY STATISTICS")
+message("Total territories: ", nrow(shapefile.data))
+message("Unique names: ", n_distinct(shapefile.data$NAME))
+message("States with territories: ", n_distinct(state_lookup$STATE_NAME, na.rm = TRUE))
+message("Total 2020 population: ", format(sum(shapefile.data$POP_2020, na.rm = TRUE), big.mark = ","))
+message("Territories with pop > 0: ", territories_with_pop)
+message("Territories with NA/zero pop: ", territories_no_pop)
+
+# FUNCSTAT distribution
+funcstat_counts = shapefile.data %>%
+  group_by(FUNCSTAT) %>%
+  summarise(
+    n = n(),
+    pop = sum(POP_2020, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Territory counts
+name_counts = shapefile.data %>%
+  count(NAME, sort = TRUE)
+
+state_counts = shapefile.data %>%
+  filter(!is.na(STATE_NAME)) %>%
+  count(STATE_NAME, sort = TRUE)
+```
+
+## Extra Data Table Stats
+```{r}
+# Population by State
+print(state_pop, n = Inf)
+# Territories by State
+print(state_counts, n = Inf)
+```

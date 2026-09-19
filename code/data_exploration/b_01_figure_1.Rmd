@@ -1,0 +1,296 @@
+---
+title: "Figure 1"
+output: html_document
+---
+
+## Setup - load packages and folder structure
+```{r, message=FALSE}
+rm(list = ls())
+
+# load required packages
+library(data.table)
+library(ggplot2)
+library(rgdal)
+library(sf)
+library(dplyr)
+library(tidyr)
+library(cowplot)
+library(MetBrewer)
+library(scales)
+library(readr)
+library(stringr)
+library(here)
+
+# set up folder paths
+project.folder = paste0(here::here(), '/')
+source(paste0(project.folder, 'create_folder_structure.R'))
+source(paste0(functions.folder, 'script_initiate.R'))
+```
+
+## Prepare map structure
+```{r}
+theme_map = function(base_size = 10, base_family = "") {
+  require(grid)
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      axis.line = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      axis.title = element_blank(),
+      panel.background = element_blank(),
+      panel.border = element_blank(),
+      panel.grid = element_blank(),
+      panel.spacing = unit(0, "lines"),
+      plot.background = element_blank(),
+      legend.position = 'bottom'
+    )
+}
+```
+
+## Load processed data (from b_00_native_land_explore.Rmd)
+```{r}
+shapefile.data <- readRDS(paste0(project.folder, "data/processed/shapefile_data_all.rds"))
+us.main <- readRDS(paste0(project.folder, "data/processed/us_main_shapefile.rds"))
+USA.df <- readRDS(paste0(project.folder, "data/processed/usa_map_data.rds"))
+
+# Ensure consistent types
+shapefile.data$GEOID <- as.character(shapefile.data$GEOID)
+USA.df$native_id <- str_pad(as.character(USA.df$native_id), width = 7, side = "left", pad = "0")
+```
+
+## Load WBGT regression file
+```{r}
+dat.wbgt.summarised.regression <- readRDS(
+  paste0(wbgt.folder, 'weighted_area_raster_native_wbgtmax_daily_',
+         start_year_wbgt, '_', end_year_wbgt, '_regression_analysis.rds')
+) %>%
+  mutate(native_id = str_pad(as.character(native_id), width = 7, side = "left", pad = "0"))
+```
+
+## Load WBGT over time file
+```{r}
+dat.wbgt.summarised <- readRDS(
+  paste0(wbgt.folder, 'weighted_area_raster_native_wbgtmax_daily_',
+         start_year_wbgt, '_', end_year_wbgt, '_over_time.rds')
+) %>%
+  mutate(
+    native_id = str_pad(as.character(native_id), width = 7, side = "left", pad = "0"),
+    year = as.numeric(as.character(year))
+  )
+```
+
+## Prepare data for Panel A: Territory bar chart (now self-contained)
+```{r}
+# Build the merged data that was previously created in b_02
+dat.wbgt.summarised.merged.weighted.native.more.info <- dat.wbgt.summarised %>%
+  left_join(
+    shapefile.data %>% select(GEOID, NAME, NAMELSAD, STATE_NAME, FUNCSTAT, POP_2020),
+    by = c('native_id' = 'GEOID')
+  ) %>%
+  filter(!is.na(STATE_NAME), !is.na(POP_2020), POP_2020 > 0)
+
+dat.territory <- dat.wbgt.summarised.merged.weighted.native.more.info
+
+## Calculate population-weighted values by territory and year
+dat.territory.year <- dat.territory %>%
+  group_by(native_id, NAME, NAMELSAD, STATE_NAME, year) %>%
+  summarise(
+    wbgt_28 = weighted.mean(wbgt_28, POP_2020, na.rm = TRUE),
+    POPULATION = sum(POP_2020),
+    .groups = "drop"
+  ) %>%
+  mutate(wbgt_28_pop = wbgt_28 * POPULATION)
+
+## Take 5-year average for each territory
+dat.territory.5year <- dat.territory.year %>%
+  filter(year %in% years_wbgtmax[c((length(years_wbgtmax)-4):length(years_wbgtmax))]) %>%
+  group_by(native_id, NAME, NAMELSAD, STATE_NAME) %>%
+  summarise(
+    wbgt_28_pop_mean = mean(wbgt_28_pop),
+    .groups = "drop"
+  )
+
+## Count territories per state and create state labels
+state_territory_counts <- dat.territory.5year %>%
+  group_by(STATE_NAME) %>%
+  summarise(
+    n_territories = n_distinct(native_id),
+    total_person_days = sum(wbgt_28_pop_mean),
+    .groups = "drop"
+  ) %>%
+  mutate(STATE_LABEL = paste0(STATE_NAME, " (", n_territories, ")"))
+
+## Calculate rank and merge
+dat.rank <- state_territory_counts %>%
+  arrange(total_person_days) %>%
+  mutate(rank = row_number())
+
+## Plot data preparation - use GEOID-based unique labeling to handle duplicate names
+dat.plot <- dat.territory.5year %>%
+  left_join(state_territory_counts, by = "STATE_NAME") %>%
+  left_join(dat.rank %>% select(STATE_NAME, rank), by = "STATE_NAME")
+
+top_n_count <- 100 # of Territories included
+
+# Use NAMELSAD for unique identification (includes type suffix like "Reservation", "Colony", etc.)
+tribe_totals <- dat.plot %>%
+  group_by(native_id, NAME, NAMELSAD) %>%
+  summarise(total = sum(wbgt_28_pop_mean), .groups = "drop")
+
+top_tribes <- tribe_totals %>%
+  arrange(desc(total)) %>%
+  slice_head(n = top_n_count)
+
+dat.top <- dat.plot %>% filter(native_id %in% top_tribes$native_id)
+```
+
+## Load US state shapefile for mapping
+```{r}
+us <- readOGR(dsn = paste0(data.folder, "shapefiles/states"), layer = "states", verbose = FALSE)
+
+us_aea <- spTransform(
+  us,
+  CRS("+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs")
+)
+us_aea@data$id <- rownames(us_aea@data)
+us_aea <- us_aea[us_aea$STATE_FIPS %in% states_included, ]
+us_aea <- spTransform(
+  us_aea,
+  CRS("+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs")
+)
+us_aea <- fortify(us_aea)
+```
+
+## Create Panel A: Territory stacked bar chart
+```{r}
+# Create unique label for each territory (handles duplicate NAMEs across states)
+dat.top <- dat.top %>%
+  mutate(territory_label = ifelse(
+    duplicated(NAME) | duplicated(NAME, fromLast = TRUE),
+    paste0(NAMELSAD, " (", STATE_NAME, ")"),
+    NAMELSAD
+  ))
+
+plot.territory.bar.chart <-
+  ggplot(dat.top,
+         aes(x = reorder(territory_label, wbgt_28_pop_mean, FUN = sum),
+             y = wbgt_28_pop_mean,
+             fill = STATE_NAME)) +
+  geom_col(width = .75, colour = "white", linewidth = .125, position = "stack") +
+  coord_flip() +
+  labs(
+    y = paste0('Mean annual dangerous hot-humid person-days\n',
+               end_year_wbgt - 4, '-', end_year_wbgt),
+    fill = "State",
+    x = paste0('Top 100 Territories by Hazardous Heat Exposure')
+  ) +
+  scale_y_continuous(labels = scales::comma,
+                     expand = expansion(mult = c(0.02, 0.15))) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_line(colour = "gray95", linewidth = .2),
+    panel.grid.major.y = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    plot.background  = element_rect(fill = "white"),
+    axis.text.x = element_text(size = 9, margin = margin(t = 8)),
+    axis.text.y = element_text(size = 5, margin = margin(r = 8)),
+    axis.title.x = element_text(margin = margin(t = 12), size = 10),
+    axis.title.y = element_text(margin = margin(r = 12), size = 10),
+    legend.position = "bottom",
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 9),
+    legend.box = "horizontal"
+  )
+```
+
+## Prepare summary maps
+```{r}
+USA.df.merged <- USA.df %>%
+  mutate(native_id = as.character(native_id)) %>%
+  left_join(
+    shapefile.data %>% select(GEOID, NAME, STATE_NAME, FUNCSTAT, POP_2020),
+    by = c("native_id" = "GEOID")
+  ) %>%
+  filter(!is.na(POP_2020), POP_2020 > 0) %>%
+  left_join(dat.wbgt.summarised.regression, by = 'native_id') %>%
+  arrange(id, order)
+```
+
+## Prepare colors and legends of maps
+```{r}
+legend_create_count_last_5_years = function(threshold) {
+  paste0('Mean annual number of dangerous hot-humid\ndays (WBGT > ', threshold,
+         '\u00B0C) during ', (end_year_wbgt - 4), '-', end_year_wbgt)
+}
+
+plot_last_5_years = function(threshold_chosen, legend_chosen = 0) {
+  fill_col <- paste0('wbgt_', threshold_chosen, '_', (end_year_wbgt - 4), '_', end_year_wbgt)
+  max_val <- max(USA.df.merged[[fill_col]], na.rm = TRUE)
+
+  p = ggplot() +
+    geom_polygon(data = us_aea, aes(x = long, y = lat, group = group),
+                 fill = alpha('grey35', 1),
+                 color = alpha('grey15', 0.9),
+                 size = 0.25) +
+    geom_polygon(data = USA.df.merged,
+                 aes(x = long, y = lat, group = group,
+                     fill = .data[[fill_col]]),
+                 color = scales::alpha("white", 0.01),
+                 size = 0.01) +
+    scale_fill_gradientn(colors = rev(MetBrewer::met.brewer('Tam')),
+                         limits = c(0, max_val),
+                         na.value = "grey35") +
+    coord_fixed() + xlab('') + ylab('') + theme_bw() +
+    theme(panel.grid.major = element_blank(),
+          axis.text.x = element_text(angle = 90),
+          axis.ticks.x = element_blank(),
+          legend.text = element_text(size = 5),
+          panel.grid.minor = element_blank(),
+          axis.line = element_line(colour = "black"),
+          panel.border = element_rect(colour = "black"),
+          strip.background = element_blank(),
+          legend.justification = 'center',
+          legend.position = 'bottom',
+          legend.background = element_rect(fill = "white", size = .5, linetype = "dotted")) +
+    theme_map()
+
+  if (legend_chosen == 0) {
+    p = p + guides(fill = "none")
+  }
+  if (legend_chosen == 1) {
+    p = p +
+      guides(fill = guide_colorbar(direction = "horizontal",
+                                   title.position = "left",
+                                   barwidth = 10,
+                                   barheight = 1,
+                                   title.vjust = 0.8,
+                                   title = legend_create_count_last_5_years(threshold_chosen)))
+  }
+
+  return(p)
+}
+
+plot.count.last.5.years.28 = plot_last_5_years(28, 1)
+```
+
+## Plot and save
+```{r}
+pdf(paste0(figures.folder, 'Figure_1.pdf'),
+    paper = 'a4r',
+    width = 0,
+    height = 0)
+print(plot_grid(plot.territory.bar.chart,
+                plot.count.last.5.years.28,
+                label_size = 14,
+                label_x = -0.02,
+                label_y = 1,
+                labels = c('(a)', '(b)')))
+dev.off()
+
+plot_grid(plot.territory.bar.chart,
+          plot.count.last.5.years.28,
+          label_size = 14,
+          label_x = -0.02,
+          label_y = 1,
+          labels = c('(a)', '(b)'))
+```

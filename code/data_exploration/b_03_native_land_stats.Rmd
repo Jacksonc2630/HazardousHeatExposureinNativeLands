@@ -1,0 +1,346 @@
+---
+title: "Stats"
+output: html_document
+---
+
+## Setup - load packages and folder structure
+```{r, message=FALSE}
+rm(list = ls())
+
+# set up folder paths
+library(here)
+project.folder = paste0(here::here(), '/')
+source(paste0(project.folder, 'create_folder_structure.R'))
+source(paste0(functions.folder, 'script_initiate.R'))
+
+# load required packages
+library(ggplot2)
+library(rgdal)
+library(sf)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(purrr)
+library(stringr)
+library(broom)
+```
+
+## Load all processed data (from b_00_native_land_explore.Rmd)
+```{r}
+# Shapefile data with state assignments
+shapefile.data <- readRDS(paste0(project.folder, "data/processed/shapefile_data_all.rds"))
+shapefile.data$GEOID <- as.character(shapefile.data$GEOID)
+
+# State population summary
+state_pop <- readRDS(paste0(project.folder, "data/processed/state_population_summary.rds"))
+
+# State lookup from processed data
+state_lookup <- shapefile.data %>%
+  filter(!is.na(STATE_NAME)) %>%
+  distinct(GEOID, STATE_NAME)
+
+# WBGT Regression
+dat.wbgt.summarised.regression <- readRDS(
+  paste0(wbgt.folder, 'weighted_area_raster_native_wbgtmax_daily_',
+         start_year_wbgt, '_', end_year_wbgt, '_regression_analysis.rds')
+) %>%
+  mutate(native_id = str_pad(as.character(native_id), width = 7, side = "left", pad = "0"))
+
+# WBGT over time
+dat.wbgt.summarised <- readRDS(
+  paste0(wbgt.folder, 'weighted_area_raster_native_wbgtmax_daily_',
+         start_year_wbgt, '_', end_year_wbgt, '_over_time.rds')
+) %>%
+  mutate(
+    native_id = str_pad(as.character(native_id), width = 7, side = "left", pad = "0"),
+    year = as.numeric(as.character(year))
+  )
+
+# State-level WBGT over time (needed for disparity calculations)
+dat.wbgt.summarised.merged.weighted.state <- readRDS(
+  paste0(wbgt.folder, 'weighted_area_raster_state_wbgtmax_daily_',
+         start_year_wbgt, '_', end_year_wbgt, '_over_time.rds')
+) %>%
+  rename(
+    wbgt_26_state = wbgt_26,
+    wbgt_28_state = wbgt_28,
+    wbgt_30_state = wbgt_30,
+    wbgt_35_state = wbgt_35
+  )
+
+message("All data loaded successfully")
+```
+
+## Native Explore Stats
+```{r}
+territories_with_pop <- sum(!is.na(shapefile.data$POP_2020) & shapefile.data$POP_2020 > 0)
+territories_no_pop  <- sum(is.na(shapefile.data$POP_2020) | shapefile.data$POP_2020 == 0)
+
+message("SUMMARY STATISTICS")
+message("Total territories: ", nrow(shapefile.data))
+message("Unique names: ", n_distinct(shapefile.data$NAME))
+message("States with territories: ", n_distinct(state_lookup$STATE_NAME, na.rm = TRUE))
+message("Total 2020 population: ", format(sum(shapefile.data$POP_2020, na.rm = TRUE), big.mark = ","))
+message("Territories with pop > 0: ", territories_with_pop)
+message("Territories with NA/zero pop: ", territories_no_pop)
+
+# Population by State
+print(state_pop, n = Inf)
+```
+
+## Values (Pertaining to figure 1)
+```{r}
+message("Potentially hazardous heat per standard environmental epidemiological research is defined as WBGT > 28\u00B0C threshold")
+
+# Territories with increasing dangerous heat days
+territories_with_trends <- dat.wbgt.summarised.regression %>%
+  left_join(shapefile.data, by = c('native_id' = 'GEOID')) %>%
+  filter(!is.na(POP_2020), POP_2020 > 0)
+
+territories_increasing_28 <- territories_with_trends %>%
+  filter(total_change_wbgt_28 > 0)
+
+n_increasing <- nrow(territories_increasing_28)
+n_total <- nrow(territories_with_trends)
+pct_increasing <- 100 * n_increasing / n_total
+
+message(sprintf("Territories with increasing heat days (WBGT > 28\u00B0C): %d out of %d (%.1f%%)",
+            n_increasing, n_total, pct_increasing))
+
+# Geographic distribution
+increasing_by_state <- territories_increasing_28 %>%
+  group_by(STATE_NAME) %>%
+  summarise(
+    n_territories = n(),
+    total_pop = sum(POP_2020, na.rm = TRUE),
+    mean_increase = mean(total_change_wbgt_28, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_territories))
+
+print(head(increasing_by_state, 10))
+
+# Person-day exposure
+dat.wbgt.with.pop <- dat.wbgt.summarised %>%
+  left_join(shapefile.data, by = c('native_id' = 'GEOID')) %>%
+  filter(!is.na(POP_2020), POP_2020 > 0)
+
+local_years <- sort(unique(dat.wbgt.with.pop$year))
+last_5_years <- local_years[(length(local_years) - 4):length(local_years)]
+
+exposure_by_state <- dat.wbgt.with.pop %>%
+  filter(year %in% last_5_years) %>%
+  group_by(STATE_NAME, FUNCSTAT) %>%
+  summarise(
+    population = sum(POP_2020, na.rm = TRUE),
+    wbgt_28_days = weighted.mean(wbgt_28, POP_2020, na.rm = TRUE),
+    person_days = wbgt_28_days * population,
+    .groups = "drop"
+  ) %>%
+  group_by(STATE_NAME) %>%
+  summarise(
+    total_pop = sum(population),
+    total_person_days = sum(person_days),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_pop = 100 * total_pop / sum(total_pop),
+    pct_exposure = 100 * total_person_days / sum(total_person_days)
+  ) %>%
+  arrange(desc(total_person_days))
+
+top_2_states <- head(exposure_by_state, 2)
+top_2_combined_exposure <- sum(top_2_states$pct_exposure)
+top_2_combined_pop <- sum(top_2_states$pct_pop)
+
+message("   Top 2 states: ", paste(top_2_states$STATE_NAME, collapse = " and "))
+message("   Combined exposure: ", sprintf("%.1f%%", top_2_combined_exposure))
+message("   Combined population: ", sprintf("%.1f%%", top_2_combined_pop))
+```
+
+## Values (Pertaining to figure 2)
+```{r}
+states_data <- readOGR(
+  dsn = paste0(data.folder, "shapefiles/states"),
+  layer = "states",
+  verbose = FALSE
+)@data
+
+state_fips_lookup <- shapefile.data %>%
+  filter(!is.na(STATE_NAME)) %>%
+  distinct(STATE_NAME) %>%
+  left_join(
+    states_data %>% select(STATE_NAME, STATE_FIPS),
+    by = "STATE_NAME"
+  )
+
+# Build Native vs State comparison (self-contained - no dependency on Figure 2)
+dat.wbgt.summarised.merged.weighted.native.state <- dat.wbgt.summarised %>%
+  left_join(
+    shapefile.data %>% select(GEOID, STATE_NAME, POP_2020),
+    by = c("native_id" = "GEOID")
+  ) %>%
+  filter(!is.na(STATE_NAME), !is.na(POP_2020), POP_2020 > 0) %>%
+  group_by(STATE_NAME, year) %>%
+  summarise(
+    wbgt_28 = weighted.mean(wbgt_28, POP_2020, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(state_fips_lookup, by = "STATE_NAME") %>%
+  rename(state = STATE_FIPS) %>%
+  left_join(dat.wbgt.summarised.merged.weighted.state, by = c("state", "year")) %>%
+  mutate(wbgt_28_diff = wbgt_28 - wbgt_28_state)
+
+# Panel a - Native vs State comparison
+message("Panel a - Native vs State Disparity:")
+message("  States: ", n_distinct(dat.wbgt.summarised.merged.weighted.native.state$STATE_NAME))
+message("  Years: ", length(unique(dat.wbgt.summarised.merged.weighted.native.state$year)))
+
+# Top 5 states with largest disparities
+top5_disparities <- dat.wbgt.summarised.merged.weighted.native.state %>%
+  group_by(STATE_NAME) %>%
+  summarise(mean_diff = mean(wbgt_28_diff, na.rm = TRUE), .groups = 'drop') %>%
+  arrange(desc(mean_diff)) %>%
+  slice_head(n = 5)
+
+message("  Top 5 states with largest disparities:")
+for(i in 1:nrow(top5_disparities)) {
+  message("    ", i, ". ", top5_disparities$STATE_NAME[i], ": ",
+          round(top5_disparities$mean_diff[i], 2), " days/year")
+}
+
+if (!"total_change_disparity_wbgt_28" %in% names(dat.wbgt.summarised.regression)) {
+  message("\nComputing disparity regression (normally done in Figure 2)...")
+
+  # Individual Native vs state comparison
+  dat.individual.native.state <- dat.wbgt.summarised %>%
+    left_join(
+      shapefile.data %>% select(GEOID, STATE_NAME, POP_2020),
+      by = c("native_id" = "GEOID")
+    ) %>%
+    filter(!is.na(STATE_NAME), !is.na(POP_2020), POP_2020 > 0) %>%
+    left_join(state_fips_lookup, by = "STATE_NAME") %>%
+    rename(state = STATE_FIPS) %>%
+    left_join(dat.wbgt.summarised.merged.weighted.state, by = c("state", "year")) %>%
+    mutate(wbgt_28_diff = wbgt_28 - wbgt_28_state)
+
+  local_years_reg <- sort(unique(dat.individual.native.state$year))
+
+  dat.disparity.regression.28 <- dat.individual.native.state %>%
+    group_by(native_id) %>%
+    do(tidy(lm(wbgt_28_diff ~ year, data = .))) %>%
+    filter(term == 'year') %>%
+    select(native_id, estimate) %>%
+    mutate(
+      total_change_disparity_wbgt_28 = estimate * length(local_years_reg),
+      annual_change_disparity_wbgt_28 = estimate
+    ) %>%
+    select(native_id, annual_change_disparity_wbgt_28, total_change_disparity_wbgt_28)
+
+  dat.wbgt.summarised.regression <- dat.wbgt.summarised.regression %>%
+    left_join(dat.disparity.regression.28, by = "native_id")
+}
+
+## Figure 2b output
+dat.wbgt.summarised.regression.output <- dat.wbgt.summarised.regression %>%
+  select(native_id, total_change_wbgt_28) %>%
+  mutate(total_change_wbgt_28 = round(total_change_wbgt_28, 1)) %>%
+  left_join(shapefile.data %>% select(GEOID, NAME, STATE_NAME, POP_2020),
+            by = c('native_id' = 'GEOID')) %>%
+  filter(!is.na(POP_2020), POP_2020 > 0) %>%
+  rename(territory_name = NAME)
+
+## Figure 2c output
+dat.wbgt.summarised.regression.disparity.output <- dat.wbgt.summarised.regression %>%
+  select(native_id, total_change_disparity_wbgt_28) %>%
+  mutate(total_change_disparity_wbgt_28 = round(total_change_disparity_wbgt_28, 1)) %>%
+  left_join(shapefile.data %>% select(GEOID, NAME, STATE_NAME, POP_2020),
+            by = c('native_id' = 'GEOID')) %>%
+  filter(!is.na(POP_2020), POP_2020 > 0) %>%
+  rename(territory_name = NAME)
+
+# Panel b - Total change over time
+message("\nPanel b - Total Change in Heat Exposure:")
+message("  Territories: ", nrow(dat.wbgt.summarised.regression.output))
+
+mean_total_change <- mean(dat.wbgt.summarised.regression.output$total_change_wbgt_28, na.rm = TRUE)
+message("  Mean total change: ", round(mean_total_change, 1), " days")
+
+top5_total <- dat.wbgt.summarised.regression.output %>%
+  arrange(desc(total_change_wbgt_28)) %>%
+  slice_head(n = 5)
+
+message("  Top 5 territories with largest total change:")
+for(i in 1:nrow(top5_total)) {
+  message("    ", i, ". ", top5_total$territory_name[i], ": ",
+          round(top5_total$total_change_wbgt_28[i], 1), " days")
+}
+
+# Panel c - Disparity change over time
+message("\nPanel c - Change in Native-State Disparity:")
+message("  Territories: ", nrow(dat.wbgt.summarised.regression.disparity.output))
+
+mean_disparity_change <- mean(dat.wbgt.summarised.regression.disparity.output$total_change_disparity_wbgt_28, na.rm = TRUE)
+message("  Mean disparity change: ", round(mean_disparity_change, 1), " days")
+
+top5_disparity <- dat.wbgt.summarised.regression.disparity.output %>%
+  arrange(desc(total_change_disparity_wbgt_28)) %>%
+  slice_head(n = 5)
+
+message("  Top 5 territories with largest disparity change:")
+for(i in 1:nrow(top5_disparity)) {
+  message("    ", i, ". ", top5_disparity$territory_name[i], ": ",
+          round(top5_disparity$total_change_disparity_wbgt_28[i], 1), " days")
+}
+```
+
+## Save
+```{r}
+dir.create(paste0(project.folder, "figures/Statistics"), recursive = TRUE, showWarnings = FALSE)
+
+capture.output(
+  {
+    cat("# Stats\n\n")
+
+    ## Native Explore Stats
+    cat("## Native Explore Stats\n\n")
+    cat(sprintf("- Total territories: %d\n", nrow(shapefile.data)))
+    cat(sprintf("- Unique names: %d\n", n_distinct(shapefile.data$NAME)))
+    cat(sprintf("- States with territories: %d\n", n_distinct(state_lookup$STATE_NAME, na.rm = TRUE)))
+    cat(sprintf("- Total 2020 population: %s\n", format(sum(shapefile.data$POP_2020, na.rm = TRUE), big.mark = ",")))
+    cat(sprintf("- Territories with pop > 0: %d\n", sum(shapefile.data$POP_2020 > 0, na.rm = TRUE)))
+    cat(sprintf("- Territories with NA/zero pop: %d\n\n", sum(is.na(shapefile.data$POP_2020) | shapefile.data$POP_2020 == 0)))
+    print(state_pop, n = Inf)
+
+    ## Figure 1
+    cat("\n## Figure 1\n\n")
+    cat(sprintf("- Territories with increasing heat days (WBGT > 28C): %d out of %d (%.1f%%)\n\n",
+                n_increasing, n_total, pct_increasing))
+    print(head(increasing_by_state, 10), n = Inf)
+    cat("\n")
+    cat(sprintf("- Top 2 states: %s and %s\n", top_2_states$STATE_NAME[1], top_2_states$STATE_NAME[2]))
+    cat(sprintf("- Combined exposure: %.1f%%\n", top_2_combined_exposure))
+    cat(sprintf("- Combined population: %.1f%%\n", top_2_combined_pop))
+
+    ## Figure 2
+    cat("\n## Figure 2\n\n")
+    cat("### Panel a\n")
+    cat(sprintf("- States: %d\n", n_distinct(dat.wbgt.summarised.merged.weighted.native.state$STATE_NAME)))
+    cat(sprintf("- Years: %d\n\n", length(unique(dat.wbgt.summarised.merged.weighted.native.state$year))))
+    print(top5_disparities, n = Inf)
+
+    cat("\n### Panel b\n")
+    cat(sprintf("- Territories: %d\n", nrow(dat.wbgt.summarised.regression.output)))
+    cat(sprintf("- Mean total change: %.1f days\n\n", mean_total_change))
+    print(top5_total, n = Inf)
+
+    cat("\n### Panel c\n")
+    cat(sprintf("- Territories: %d\n", nrow(dat.wbgt.summarised.regression.disparity.output)))
+    cat(sprintf("- Mean disparity change: %.1f days\n\n", mean_disparity_change))
+    print(top5_disparity, n = Inf)
+  },
+  file = paste0(project.folder, "figures/Statistics/stats.md")
+)
+
+message("\nStats saved to figures/Statistics/stats.md")
+```

@@ -1,0 +1,110 @@
+---
+title: "Prepare WBGT native summary data"
+output: html_document
+---
+## First step to load packages and file locations etc.
+```{r include=FALSE}
+rm(list=ls())
+project.folder = paste0(print(here::here()),'/')
+source(paste0(project.folder,'create_folder_structure.R'))
+source(paste0(functions.folder,'script_initiate.R'))
+```
+
+## Load native WBGT file
+```{r}
+dat.wbgt = readRDS(paste0(wbgt.folder,'weighted_area_raster_native_wbgtmax_daily_',start_year_wbgt,'_',end_year_wbgt,'.rds'))
+```
+
+## Number of days per year above or equal to 26C, 28C, 30C, 35C
+```{r}
+dat.wbgt.summarised = dat.wbgt %>%
+  mutate(wbgt_26=ifelse(wbgtmax>26,1,0),wbgt_28=ifelse(wbgtmax>28,1,0),
+         wbgt_30=ifelse(wbgtmax>30,1,0),wbgt_35=ifelse(wbgtmax>35,1,0)) %>%
+  group_by(native_id, year) %>%
+  dplyr::summarise(wbgt_26=sum(wbgt_26), wbgt_28=sum(wbgt_28), wbgt_30=sum(wbgt_30), wbgt_35=sum(wbgt_35))
+```
+
+## Save file over time
+```{r}
+saveRDS(dat.wbgt.summarised,paste0(wbgt.folder,'weighted_area_raster_native_wbgtmax_daily_',start_year_wbgt,'_',end_year_wbgt,'_over_time.rds'))
+```
+
+## Take Number of days in first year, last year and last 5 years of data
+```{r}
+dat.wbgt.summarised.start = dat.wbgt.summarised %>%
+  filter(year%in%c(start_year_wbgt)) %>%
+  dplyr::select(-year) %>%
+  dplyr::rename_with(~ paste0(., "_", start_year_wbgt), -native_id)
+
+dat.wbgt.summarised.end = dat.wbgt.summarised %>%
+  filter(year%in%c(end_year_wbgt)) %>%
+  dplyr::select(-year) %>%
+  dplyr::rename_with(~ paste0(., "_", end_year_wbgt), -native_id)
+
+dat.wbgt.summarised.last.5 = dat.wbgt.summarised %>%
+  filter(year%in%c((end_year_wbgt-4):end_year_wbgt)) %>%
+  group_by(native_id) %>%
+  summarise(wbgt_26=mean(wbgt_26),
+            wbgt_28=mean(wbgt_28),
+            wbgt_30=mean(wbgt_30),
+            wbgt_35=mean(wbgt_35)) %>%
+  dplyr::rename_with(~ paste0(., "_", as.numeric(end_year_wbgt-4), "_", end_year_wbgt), -native_id)
+```
+
+## Trends in growth of number of day per year over time
+```{r}
+dat.wbgt.summarised.regression.26 = dat.wbgt.summarised %>%
+  mutate(year=as.numeric(year)) %>%
+  group_by(native_id) %>%
+  do(broom::tidy(lm(wbgt_26 ~ year, data = .))) %>%
+  filter(term=='year') %>%
+  select(native_id,estimate) %>%
+  mutate(total_change_wbgt_26=estimate*(length(years_wbgtmax))) %>%
+  rename(annual_change_wbgt_26=estimate) %>%
+  select(native_id,annual_change_wbgt_26,total_change_wbgt_26)
+
+dat.wbgt.summarised.regression.28 = dat.wbgt.summarised %>%
+  mutate(year=as.numeric(year)) %>%
+  group_by(native_id) %>%
+  do(broom::tidy(lm(wbgt_28 ~ year, data = .))) %>%
+  filter(term=='year') %>%
+  select(native_id,estimate) %>%
+  mutate(total_change_wbgt_28=estimate*(length(years_wbgtmax))) %>%
+  rename(annual_change_wbgt_28=estimate) %>%
+  select(native_id,annual_change_wbgt_28,total_change_wbgt_28)
+
+dat.wbgt.summarised.regression.30 = dat.wbgt.summarised %>%
+  mutate(year=as.numeric(year)) %>%
+  group_by(native_id) %>%
+  do(broom::tidy(lm(wbgt_30 ~ year, data = .))) %>%
+  filter(term=='year') %>%
+  select(native_id,estimate) %>%
+  mutate(total_change_wbgt_30=estimate*(length(years_wbgtmax))) %>%
+  rename(annual_change_wbgt_30=estimate) %>%
+  select(native_id,annual_change_wbgt_30,total_change_wbgt_30)
+
+dat.wbgt.summarised.regression.35 = dat.wbgt.summarised %>%
+  mutate(year=as.numeric(year)) %>%
+  group_by(native_id) %>%
+  do(broom::tidy(lm(wbgt_35 ~ year, data = .))) %>%
+  filter(term=='year') %>%
+  select(native_id,estimate) %>%
+  mutate(total_change_wbgt_35=estimate*(length(years_wbgtmax))) %>%
+  rename(annual_change_wbgt_35=estimate) %>%
+  select(native_id,annual_change_wbgt_35,total_change_wbgt_35)
+```
+
+## Merge regression analyses into one data frame
+```{r}
+dat.wbgt.summarised.regression.merged = left_join(dat.wbgt.summarised.start,dat.wbgt.summarised.end) %>%
+  left_join(.,dat.wbgt.summarised.last.5) %>%
+  left_join(.,dat.wbgt.summarised.regression.26) %>%
+  left_join(.,dat.wbgt.summarised.regression.28) %>%
+  left_join(.,dat.wbgt.summarised.regression.30) %>%
+  left_join(.,dat.wbgt.summarised.regression.35)
+```
+
+## Save regression file
+```{r}
+saveRDS(dat.wbgt.summarised.regression.merged,paste0(wbgt.folder,'weighted_area_raster_native_wbgtmax_daily_',start_year_wbgt,'_',end_year_wbgt,'_regression_analysis.rds'))
+```
